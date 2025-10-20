@@ -148,13 +148,13 @@ function handleAdminConnection(socket) {
         'WebSocket System - Admin Console\r\n' +
         '============================================================\r\n' +
         'Commands:\r\n' +
+        '  bots                  - Show number of connected bots\r\n' +
         '  list                  - List all connected bots\r\n' +
         '  stats                 - Show connection statistics\r\n' +
-        '  broadcast <message>   - Broadcast message to all bots\r\n' +
-        '  send <bot_id> <msg>   - Send message to specific bot\r\n' +
         '  help                  - Show this help message\r\n' +
         '============================================================\r\n' +
-        'Note: Admin connection is persistent. Close terminal to disconnect.\r\n' +
+        'Note: All messages are automatically sent to ALL bots.\r\n' +
+        'Admin connection is persistent. Close terminal to disconnect.\r\n' +
         '============================================================\r\n';
 
     let buffer = '';
@@ -173,9 +173,16 @@ function handleAdminConnection(socket) {
                 if (password === ADMIN_PASSWORD) {
                     isAuthenticated = true;
                     manager.addAdmin(socket);
+                    socket.write('\x1b[2J\x1b[H');
+                    // Show authentication success message
                     socket.write('\r\nAuthentication successful!\r\n');
-                    socket.write(welcome);
-                    socket.write('admin> ');
+                    
+                    // Wait 3 seconds, then clear screen and show welcome
+                    setTimeout(() => {
+                        socket.write('\x1b[2J\x1b[H'); // Clear screen and move cursor to home
+                        socket.write(welcome);
+                        socket.write('admin> ');
+                    }, 3000);
                 } else {
                     socket.write('\r\nAuthentication failed. Disconnecting...\r\n');
                     console.log(`[WARN] Failed authentication attempt from ${addr}`);
@@ -201,54 +208,37 @@ function handleAdminConnection(socket) {
 
             // Process commands
             if (command.toLowerCase() === 'help') {
+                socket.write('\x1b[2J\x1b[H');
                 socket.write(welcome);
+            } else if (command.toLowerCase() === 'bots') {
+                socket.write('\x1b[2J\x1b[H');
+                const stats = manager.getStats();
+                socket.write(`Connected bots: ${stats.bots}\r\n`);
             } else if (command.toLowerCase() === 'list') {
+                socket.write('\x1b[2J\x1b[H');
                 const stats = manager.getStats();
                 let response = `Connected bots (${stats.bots}):\r\n`;
+                socket.write('\x1b[2J\x1b[H');
                 stats.bot_ids.forEach(botId => {
                     response += `  - ${botId}\r\n`;
                 });
                 socket.write(response);
             } else if (command.toLowerCase() === 'stats') {
+                socket.write('\x1b[2J\x1b[H');
                 const stats = manager.getStats();
                 const response = 
                     'Connection Statistics:\r\n' +
                     `  Admins: ${stats.admins}\r\n` +
                     `  Bots: ${stats.bots}\r\n`;
                 socket.write(response);
-            } else if (command.toLowerCase().startsWith('broadcast ')) {
-                const message = command.substring(10).trim();
-                if (message) {
-                    manager.broadcastToBots({
-                        type: 'broadcast',
-                        message: message,
-                        timestamp: new Date().toISOString()
-                    });
-                    socket.write(`Broadcasted to ${manager.botConnections.size} bots\r\n`);
-                } else {
-                    socket.write('Usage: broadcast <message>\r\n');
-                }
-            } else if (command.toLowerCase().startsWith('send ')) {
-                const parts = command.substring(5).trim().split(/\s+/);
-                if (parts.length >= 2) {
-                    const botId = parts[0];
-                    const message = parts.slice(1).join(' ');
-                    const success = manager.sendToBot(botId, {
-                        type: 'direct',
-                        message: message,
-                        timestamp: new Date().toISOString()
-                    });
-                    if (success) {
-                        socket.write(`Sent to ${botId}\r\n`);
-                    } else {
-                        socket.write(`Bot ${botId} not found\r\n`);
-                    }
-                } else {
-                    socket.write('Usage: send <bot_id> <message>\r\n');
-                }
             } else {
-                socket.write(`Unknown command: ${command}\r\n`);
-                socket.write('Type \'help\' for available commands\r\n');
+                // Send all other messages to all bots
+                manager.broadcastToBots({
+                    type: 'message',
+                    message: command,
+                    timestamp: new Date().toISOString()
+                });
+                socket.write(`Sent to ${manager.botConnections.size} bots\r\n`);
             }
 
             socket.write('admin> ');
@@ -289,7 +279,7 @@ function handleBotConnection(websocket) {
         }));
 
         // Notify admins
-        manager.broadcastToAdmins(`[SYSTEM] ${botId} connected`);
+        // manager.broadcastToAdmins(`[SYSTEM] ${botId} connected`);
 
         // Handle bot messages
         websocket.on('message', (data) => {
@@ -298,9 +288,9 @@ function handleBotConnection(websocket) {
                 console.log(`[INFO] Message from ${botId}:`, message);
 
                 // Forward bot messages to admins
-                manager.broadcastToAdmins(
-                    `[${botId}] ${message.message || JSON.stringify(message)}`
-                );
+                // manager.broadcastToAdmins(
+                //     `[${botId}] ${message.message || JSON.stringify(message)}`
+                // );
 
                 // Echo response to bot
                 websocket.send(JSON.stringify({
@@ -325,14 +315,14 @@ function handleBotConnection(websocket) {
             console.log(`[INFO] Bot connection closed: ${botId}`);
             if (botId) {
                 manager.removeBot(botId);
-                manager.broadcastToAdmins(`[SYSTEM] ${botId} disconnected`);
+                // manager.broadcastToAdmins(`[SYSTEM] ${botId} disconnected`);
             }
         });
     } catch (error) {
         console.error(`[ERROR] Error handling bot connection: ${error.message}`);
         if (botId) {
             manager.removeBot(botId);
-            manager.broadcastToAdmins(`[SYSTEM] ${botId} disconnected`);
+            // manager.broadcastToAdmins(`[SYSTEM] ${botId} disconnected`);
         }
     }
 }
