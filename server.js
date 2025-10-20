@@ -153,7 +153,8 @@ function handleAdminConnection(socket) {
         '  broadcast <message>   - Broadcast message to all bots\r\n' +
         '  send <bot_id> <msg>   - Send message to specific bot\r\n' +
         '  help                  - Show this help message\r\n' +
-        '  quit                  - Disconnect from admin console\r\n' +
+        '============================================================\r\n' +
+        'Note: Admin connection is persistent. Close terminal to disconnect.\r\n' +
         '============================================================\r\n';
 
     let buffer = '';
@@ -199,11 +200,7 @@ function handleAdminConnection(socket) {
             }
 
             // Process commands
-            if (command.toLowerCase() === 'quit') {
-                socket.write('Goodbye!\r\n');
-                socket.end();
-                return;
-            } else if (command.toLowerCase() === 'help') {
+            if (command.toLowerCase() === 'help') {
                 socket.write(welcome);
             } else if (command.toLowerCase() === 'list') {
                 const stats = manager.getStats();
@@ -261,6 +258,10 @@ function handleAdminConnection(socket) {
     socket.on('error', (error) => {
         console.error(`[ERROR] Error in admin connection: ${error.message}`);
     });
+
+    // Keep connection alive with TCP keepalive
+    socket.setKeepAlive(true, 60000); // 60 seconds
+    socket.setTimeout(0); // Disable timeout
 
     socket.on('close', () => {
         if (isAuthenticated) {
